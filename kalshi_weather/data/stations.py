@@ -3,24 +3,19 @@ NWS Station Observation Parser for Kalshi Weather Bot.
 
 Parses real-time NWS observations with conversion handling for
 temperature uncertainty bounds.
-
-Key features:
-- Identifies station type (hourly vs 5-minute)
-- Handles °C → °F conversion uncertainty
-- Calculates possible actual temperature bounds
-- Tracks observed high and uncertainty for settlement prediction
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import requests
 
-from src.interfaces import StationReading, DailyObservation, StationDataSource, StationType
-from src.config import (
-    NYC,
+from kalshi_weather.core import StationReading, DailyObservation, StationDataSource, StationType
+from kalshi_weather.config import (
+    CityConfig,
+    DEFAULT_CITY,
     NWS_STATIONS_URL,
     NWS_USER_AGENT,
     API_TIMEOUT,
@@ -28,18 +23,11 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-# Uncertainty constants for temperature conversion
-# 5-minute stations report Celsius rounded to 0.1°C
-# This creates ±0.05°C uncertainty which is ±0.09°F
-FIVE_MINUTE_C_PRECISION = 0.1  # °C
-FIVE_MINUTE_F_UNCERTAINTY = 0.1  # °F (rounded up from 0.09)
-
-# Hourly stations report more precisely, lower uncertainty
-HOURLY_F_UNCERTAINTY = 0.5  # °F
-
-# Additional uncertainty for settlement: actual max could be between readings
-# If readings are 5 minutes apart, max could occur between them
-INTER_READING_UNCERTAINTY = 1.0  # °F
+# Uncertainty constants
+FIVE_MINUTE_C_PRECISION = 0.1
+FIVE_MINUTE_F_UNCERTAINTY = 0.1
+HOURLY_F_UNCERTAINTY = 0.5
+INTER_READING_UNCERTAINTY = 1.0
 
 
 def celsius_to_fahrenheit(celsius: float) -> float:
@@ -52,46 +40,22 @@ def calculate_temp_bounds(
     temp_f: float,
     station_type: StationType,
 ) -> tuple[float, float]:
-    """
-    Calculate possible actual temperature bounds given conversion uncertainty.
-
-    Args:
-        temp_c: Temperature in Celsius (if available from API)
-        temp_f: Temperature in Fahrenheit
-        station_type: Type of station (affects uncertainty)
-
-    Returns:
-        Tuple of (low_bound_f, high_bound_f) for possible actual temperature
-    """
+    """Calculate possible actual temperature bounds given conversion uncertainty."""
     if station_type == StationType.FIVE_MINUTE:
-        # 5-minute stations have more uncertainty due to:
-        # 1. Celsius rounding (±0.05°C = ±0.09°F)
-        # 2. Potential additional rounding in F display
-        uncertainty = FIVE_MINUTE_F_UNCERTAINTY + 0.5  # Total ~0.6°F
+        uncertainty = FIVE_MINUTE_F_UNCERTAINTY + 0.5
     elif station_type == StationType.HOURLY:
-        # Hourly stations are more precise
         uncertainty = HOURLY_F_UNCERTAINTY
     else:
-        # Unknown station type, use conservative uncertainty
         uncertainty = 1.0
 
     return (temp_f - uncertainty, temp_f + uncertainty)
 
 
 def determine_station_type(observations: List[dict]) -> StationType:
-    """
-    Determine station type based on observation frequency.
-
-    Args:
-        observations: List of observation dicts from NWS API
-
-    Returns:
-        StationType based on typical interval between observations
-    """
+    """Determine station type based on observation frequency."""
     if len(observations) < 2:
         return StationType.UNKNOWN
 
-    # Calculate intervals between consecutive observations
     intervals = []
     for i in range(len(observations) - 1):
         try:
@@ -111,8 +75,6 @@ def determine_station_type(observations: List[dict]) -> StationType:
 
     avg_interval = sum(intervals) / len(intervals)
 
-    # 5-minute stations have ~5 minute intervals
-    # Hourly stations have ~60 minute intervals
     if avg_interval < 15:
         return StationType.FIVE_MINUTE
     elif avg_interval >= 45:
@@ -122,27 +84,15 @@ def determine_station_type(observations: List[dict]) -> StationType:
 
 
 def parse_observation(obs: dict, station_type: StationType, station_id: str) -> Optional[StationReading]:
-    """
-    Parse a single observation from NWS API response.
-
-    Args:
-        obs: Observation dict from NWS API
-        station_type: Type of station
-        station_id: Station identifier
-
-    Returns:
-        StationReading or None if parsing fails
-    """
+    """Parse a single observation from NWS API response."""
     try:
         properties = obs.get("properties", {})
 
-        # Parse timestamp
         timestamp_str = properties.get("timestamp")
         if not timestamp_str:
             return None
         timestamp = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
 
-        # Parse temperature
         temp_data = properties.get("temperature", {})
         temp_value = temp_data.get("value")
         unit_code = temp_data.get("unitCode", "")
@@ -150,7 +100,6 @@ def parse_observation(obs: dict, station_type: StationType, station_id: str) -> 
         if temp_value is None:
             return None
 
-        # NWS API typically returns Celsius
         if "degC" in unit_code or "celsius" in unit_code.lower():
             temp_c = float(temp_value)
             temp_f = celsius_to_fahrenheit(temp_c)
@@ -158,11 +107,9 @@ def parse_observation(obs: dict, station_type: StationType, station_id: str) -> 
             temp_f = float(temp_value)
             temp_c = None
         else:
-            # Assume Celsius if unit not specified
             temp_c = float(temp_value)
             temp_f = celsius_to_fahrenheit(temp_c)
 
-        # Calculate bounds
         low_f, high_f = calculate_temp_bounds(temp_c, temp_f, station_type)
 
         return StationReading(
@@ -182,9 +129,16 @@ def parse_observation(obs: dict, station_type: StationType, station_id: str) -> 
 class NWSStationParser(StationDataSource):
     """Fetches and parses NWS station observations."""
 
-    def __init__(self, station_id: str, timezone: str = "America/New_York"):
-        self.station_id = station_id
-        self.timezone = ZoneInfo(timezone)
+    def __init__(self, city: CityConfig = None):
+        """
+        Initialize with city configuration.
+
+        Args:
+            city: CityConfig object (default: NYC)
+        """
+        city = city or DEFAULT_CITY
+        self.station_id = city.station_id
+        self.timezone = ZoneInfo(city.timezone)
         self._cached_observations: List[dict] = []
         self._station_type: Optional[StationType] = None
         self._last_fetch: Optional[datetime] = None
@@ -194,15 +148,7 @@ class NWSStationParser(StationDataSource):
         return {"User-Agent": NWS_USER_AGENT}
 
     def _fetch_raw_observations(self, limit: int = 100) -> List[dict]:
-        """
-        Fetch raw observations from NWS API.
-
-        Args:
-            limit: Maximum number of observations to fetch
-
-        Returns:
-            List of observation dicts from API
-        """
+        """Fetch raw observations from NWS API."""
         try:
             url = NWS_STATIONS_URL.format(station_id=self.station_id)
             params = {"limit": limit}
@@ -220,7 +166,6 @@ class NWSStationParser(StationDataSource):
             self._cached_observations = features
             self._last_fetch = datetime.now(self.timezone)
 
-            # Determine station type from observations
             if features:
                 self._station_type = determine_station_type(features)
 
@@ -250,21 +195,12 @@ class NWSStationParser(StationDataSource):
         return readings
 
     def get_daily_summary(self, date: str) -> Optional[DailyObservation]:
-        """
-        Get aggregated observation data for a specific date.
-
-        Args:
-            date: Date in YYYY-MM-DD format
-
-        Returns:
-            DailyObservation with aggregated data, or None if no data
-        """
+        """Get aggregated observation data for a specific date."""
         readings = self.fetch_current_observations()
 
         if not readings:
             return None
 
-        # Filter readings for the target date
         target_date = datetime.strptime(date, "%Y-%m-%d").date()
         daily_readings = [
             r for r in readings
@@ -274,23 +210,11 @@ class NWSStationParser(StationDataSource):
         if not daily_readings:
             return None
 
-        # Find the highest reported temperature
         max_reading = max(daily_readings, key=lambda r: r.reported_temp_f)
         observed_high_f = max_reading.reported_temp_f
 
-        # Calculate possible actual high bounds
-        # The actual high could be:
-        # 1. Higher than any reading due to inter-reading variation
-        # 2. Within the uncertainty bounds of the max reading
-
-        # Get the max of all possible_actual_f_high values
         max_possible_high = max(r.possible_actual_f_high for r in daily_readings)
-
-        # Add inter-reading uncertainty (temperature could spike between readings)
         possible_actual_high_high = max_possible_high + INTER_READING_UNCERTAINTY
-
-        # The minimum possible actual high is the observed high minus uncertainty
-        # (in case the max reading was at the upper end of its uncertainty)
         possible_actual_high_low = observed_high_f - HOURLY_F_UNCERTAINTY
 
         return DailyObservation(
@@ -308,39 +232,13 @@ class NWSStationParser(StationDataSource):
         return self._station_type or StationType.UNKNOWN
 
 
-def get_station_observations(
-    station_id: str = "KNYC",
-    timezone: str = "America/New_York",
-) -> List[StationReading]:
-    """
-    Convenience function to fetch current observations for a station.
-
-    Args:
-        station_id: NWS station identifier (default: KNYC for NYC)
-        timezone: Timezone string (default: America/New_York)
-
-    Returns:
-        List of StationReading objects
-    """
-    parser = NWSStationParser(station_id, timezone)
+def get_station_observations(city: CityConfig = None) -> List[StationReading]:
+    """Convenience function to fetch current observations for a city."""
+    parser = NWSStationParser(city)
     return parser.fetch_current_observations()
 
 
-def get_daily_observation(
-    date: str,
-    station_id: str = "KNYC",
-    timezone: str = "America/New_York",
-) -> Optional[DailyObservation]:
-    """
-    Convenience function to get daily observation summary.
-
-    Args:
-        date: Date in YYYY-MM-DD format
-        station_id: NWS station identifier (default: KNYC for NYC)
-        timezone: Timezone string (default: America/New_York)
-
-    Returns:
-        DailyObservation or None if no data available
-    """
-    parser = NWSStationParser(station_id, timezone)
+def get_daily_observation(date: str, city: CityConfig = None) -> Optional[DailyObservation]:
+    """Convenience function to get daily observation summary."""
+    parser = NWSStationParser(city)
     return parser.get_daily_summary(date)

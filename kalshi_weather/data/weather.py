@@ -15,9 +15,10 @@ from typing import List, Optional
 import numpy as np
 import requests
 
-from src.interfaces import TemperatureForecast, WeatherModelSource
-from src.config import (
-    NYC,
+from kalshi_weather.core import TemperatureForecast, WeatherModelSource
+from kalshi_weather.config import (
+    CityConfig,
+    DEFAULT_CITY,
     OPEN_METEO_FORECAST_URL,
     OPEN_METEO_GFS_URL,
     OPEN_METEO_ENSEMBLE_URL,
@@ -34,10 +35,17 @@ logger = logging.getLogger(__name__)
 class OpenMeteoSource(WeatherModelSource):
     """Fetches forecasts from 3 Open-Meteo endpoints."""
 
-    def __init__(self, lat: float, lon: float, timezone: str):
-        self.lat = lat
-        self.lon = lon
-        self.timezone = timezone
+    def __init__(self, city: CityConfig = None):
+        """
+        Initialize with city configuration.
+
+        Args:
+            city: CityConfig object (default: NYC)
+        """
+        city = city or DEFAULT_CITY
+        self.lat = city.lat
+        self.lon = city.lon
+        self.timezone = city.timezone
         self._latest_model_run_time: Optional[datetime] = None
 
     def _base_params(self) -> dict:
@@ -144,7 +152,6 @@ class OpenMeteoSource(WeatherModelSource):
         """Fetch from the ensemble endpoint and calculate statistics."""
         try:
             params = self._base_params()
-            # Request ensemble members
             params["daily"] = ",".join([f"temperature_2m_max_member{i:02d}" for i in range(51)])
 
             response = requests.get(
@@ -164,7 +171,6 @@ class OpenMeteoSource(WeatherModelSource):
 
             idx = times.index(target_date)
 
-            # Extract all ensemble member temperatures for the target date
             ensemble_temps = []
             for key, values in daily.items():
                 if key.startswith("temperature_2m_max_member") and values:
@@ -175,14 +181,12 @@ class OpenMeteoSource(WeatherModelSource):
                 logger.warning("No ensemble members found in response")
                 return None
 
-            # Calculate statistics
             temps_array = np.array(ensemble_temps)
             mean_temp = float(np.mean(temps_array))
             std_dev = float(np.std(temps_array))
             low_f = float(np.percentile(temps_array, 10))
             high_f = float(np.percentile(temps_array, 90))
 
-            # Apply minimum std_dev floor
             std_dev = max(std_dev, MIN_STD_DEV)
 
             return TemperatureForecast(
@@ -229,9 +233,16 @@ class OpenMeteoSource(WeatherModelSource):
 class NWSForecastSource(WeatherModelSource):
     """Fetches forecasts from NWS API."""
 
-    def __init__(self, lat: float, lon: float):
-        self.lat = lat
-        self.lon = lon
+    def __init__(self, city: CityConfig = None):
+        """
+        Initialize with city configuration.
+
+        Args:
+            city: CityConfig object (default: NYC)
+        """
+        city = city or DEFAULT_CITY
+        self.lat = city.lat
+        self.lon = city.lon
         self._latest_model_run_time: Optional[datetime] = None
         self._forecast_url: Optional[str] = None
 
@@ -280,7 +291,6 @@ class NWSForecastSource(WeatherModelSource):
 
             periods = data.get("properties", {}).get("periods", [])
 
-            # Find the daytime period for the target date
             for period in periods:
                 start_time = period.get("startTime", "")
                 is_daytime = period.get("isDaytime", False)
@@ -321,21 +331,23 @@ class NWSForecastSource(WeatherModelSource):
 class CombinedWeatherSource(WeatherModelSource):
     """Combines all weather sources into a single interface."""
 
-    def __init__(self, lat: float, lon: float, timezone: str):
-        self.open_meteo = OpenMeteoSource(lat, lon, timezone)
-        self.nws = NWSForecastSource(lat, lon)
+    def __init__(self, city: CityConfig = None):
+        """
+        Initialize with city configuration.
+
+        Args:
+            city: CityConfig object (default: NYC)
+        """
+        self.city = city or DEFAULT_CITY
+        self.open_meteo = OpenMeteoSource(self.city)
+        self.nws = NWSForecastSource(self.city)
         self._latest_model_run_time: Optional[datetime] = None
 
     def fetch_forecasts(self, target_date: str) -> List[TemperatureForecast]:
         """Fetch all available forecasts from all sources for a target date."""
         forecasts = []
-
-        # Fetch from Open-Meteo
         forecasts.extend(self.open_meteo.fetch_forecasts(target_date))
-
-        # Fetch from NWS
         forecasts.extend(self.nws.fetch_forecasts(target_date))
-
         return forecasts
 
     def get_latest_model_run_time(self) -> Optional[datetime]:
@@ -343,24 +355,16 @@ class CombinedWeatherSource(WeatherModelSource):
         return self._latest_model_run_time
 
 
-def fetch_all_forecasts(target_date: str, city: str = "NYC") -> List[TemperatureForecast]:
+def fetch_all_forecasts(target_date: str, city: CityConfig = None) -> List[TemperatureForecast]:
     """
     Convenience function to fetch all forecasts for a target date.
 
     Args:
         target_date: Date in YYYY-MM-DD format
-        city: City code (currently only "NYC" is supported)
+        city: CityConfig object (default: NYC)
 
     Returns:
         List of TemperatureForecast objects from all sources
     """
-    if city != "NYC":
-        logger.warning(f"City {city} not supported, using NYC")
-
-    source = CombinedWeatherSource(
-        lat=NYC.lat,
-        lon=NYC.lon,
-        timezone=NYC.timezone,
-    )
-
+    source = CombinedWeatherSource(city)
     return source.fetch_forecasts(target_date)
