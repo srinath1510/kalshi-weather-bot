@@ -19,6 +19,11 @@ from kalshi_weather.engine.probability import (
     EARLY_CUTOFF_HOURS,
     LATE_CUTOFF_HOURS,
     MAX_OBSERVATION_WEIGHT,
+    # Module 2C: Bracket Probability Calculator
+    BracketProbabilityCalculator,
+    BracketProbability,
+    calculate_bracket_probabilities,
+    normal_cdf,
 )
 
 __all__ = [
@@ -35,4 +40,9 @@ __all__ = [
     "EARLY_CUTOFF_HOURS",
     "LATE_CUTOFF_HOURS",
     "MAX_OBSERVATION_WEIGHT",
+    # Module 2C
+    "BracketProbabilityCalculator",
+    "BracketProbability",
+    "calculate_bracket_probabilities",
+    "normal_cdf",
 ]

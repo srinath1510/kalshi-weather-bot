@@ -1,5 +1,5 @@
 """
-Probability Engine - Modules 2A and 2B.
+Probability Engine
 
 Module 2A: Forecast Combiner
 - Combines multiple weather forecasts into a single probability distribution
@@ -8,6 +8,10 @@ Module 2A: Forecast Combiner
 Module 2B: Observation Adjuster
 - Adjusts the combined forecast based on observed temperatures
 - Time-based weighting: early day uses forecast, late day uses observations
+
+Module 2C: Bracket Probability Calculator
+- Calculates probability for each market bracket using normal CDF
+- Handles boundary logic for BETWEEN, GREATER_THAN, LESS_THAN brackets
 """
 
 import logging
@@ -17,7 +21,12 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from kalshi_weather.core import TemperatureForecast, DailyObservation
+from kalshi_weather.core import (
+    TemperatureForecast,
+    DailyObservation,
+    MarketBracket,
+    BracketType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -578,3 +587,235 @@ def adjust_forecast_with_observations(
     """
     adjuster = ObservationAdjuster(timezone=timezone)
     return adjuster.adjust(combined_forecast, observation, current_time)
+
+
+# =============================================================================
+# MODULE 2C: BRACKET PROBABILITY CALCULATOR
+# =============================================================================
+
+@dataclass
+class BracketProbability:
+    """
+    Calculated probability for a single market bracket.
+
+    Contains both the model probability and comparison with market price.
+    """
+    bracket: MarketBracket           # The market bracket
+    model_prob: float                # Our calculated probability (0.0 to 1.0)
+    market_prob: float               # Market implied probability (0.0 to 1.0)
+    edge: float                      # model_prob - market_prob
+    edge_pct: float                  # Edge as percentage points
+
+    @property
+    def has_positive_edge(self) -> bool:
+        """True if model probability exceeds market probability."""
+        return self.edge > 0
+
+    @property
+    def edge_direction(self) -> str:
+        """Returns 'YES' if we should buy YES, 'NO' if we should buy NO."""
+        return "YES" if self.edge > 0 else "NO"
+
+
+def normal_cdf(x: float, mean: float, std_dev: float) -> float:
+    """
+    Calculate the cumulative distribution function of a normal distribution.
+
+    Uses the error function for numerical accuracy.
+
+    Args:
+        x: The value to evaluate
+        mean: Distribution mean
+        std_dev: Distribution standard deviation
+
+    Returns:
+        Probability that a random variable is less than or equal to x
+    """
+    if std_dev <= 0:
+        # Degenerate case: all probability mass at mean
+        return 1.0 if x >= mean else 0.0
+
+    z = (x - mean) / std_dev
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+class BracketProbabilityCalculator:
+    """
+    Calculates probability for each market bracket using normal distribution CDF.
+
+    Bracket boundary logic (Kalshi settlement rules):
+    - BETWEEN [lower, upper]: temp in {lower, lower+1, ..., upper} wins
+      Formula: CDF(upper + 0.5) - CDF(lower - 0.5)
+
+    - GREATER_THAN threshold: temp in {threshold+1, threshold+2, ...} wins
+      Formula: 1 - CDF(threshold + 0.5)
+
+    - LESS_THAN threshold: temp in {..., threshold-2, threshold-1} wins
+      Formula: CDF(threshold - 0.5)
+
+    The 0.5 adjustments handle the discrete nature of temperature readings
+    (whole degrees Fahrenheit) within a continuous normal distribution.
+    """
+
+    def __init__(self, min_prob: float = 0.001, max_prob: float = 0.999):
+        """
+        Initialize the calculator.
+
+        Args:
+            min_prob: Minimum probability floor (avoids 0%)
+            max_prob: Maximum probability ceiling (avoids 100%)
+        """
+        self.min_prob = min_prob
+        self.max_prob = max_prob
+
+    def _clamp_probability(self, prob: float) -> float:
+        """Clamp probability to valid range."""
+        return max(self.min_prob, min(self.max_prob, prob))
+
+    def calculate_bracket_probability(
+        self,
+        bracket: MarketBracket,
+        mean: float,
+        std_dev: float,
+    ) -> float:
+        """
+        Calculate probability for a single bracket.
+
+        Args:
+            bracket: The market bracket
+            mean: Temperature distribution mean
+            std_dev: Temperature distribution standard deviation
+
+        Returns:
+            Probability (0.0 to 1.0) that temperature falls in this bracket
+        """
+        if bracket.bracket_type == BracketType.BETWEEN:
+            # BETWEEN [lower, upper]: inclusive both ends
+            # P(lower <= T <= upper) = CDF(upper + 0.5) - CDF(lower - 0.5)
+            lower = bracket.lower_bound
+            upper = bracket.upper_bound
+            prob = (
+                normal_cdf(upper + 0.5, mean, std_dev) -
+                normal_cdf(lower - 0.5, mean, std_dev)
+            )
+
+        elif bracket.bracket_type == BracketType.GREATER_THAN:
+            # GREATER_THAN threshold: strictly greater (threshold does NOT win)
+            # P(T > threshold) = 1 - CDF(threshold + 0.5)
+            threshold = bracket.lower_bound
+            prob = 1.0 - normal_cdf(threshold + 0.5, mean, std_dev)
+
+        elif bracket.bracket_type == BracketType.LESS_THAN:
+            # LESS_THAN threshold: strictly less (threshold does NOT win)
+            # P(T < threshold) = CDF(threshold - 0.5)
+            threshold = bracket.upper_bound
+            prob = normal_cdf(threshold - 0.5, mean, std_dev)
+
+        else:
+            logger.warning(f"Unknown bracket type: {bracket.bracket_type}")
+            prob = 0.0
+
+        return self._clamp_probability(prob)
+
+    def calculate_all_probabilities(
+        self,
+        brackets: List[MarketBracket],
+        mean: float,
+        std_dev: float,
+    ) -> List[BracketProbability]:
+        """
+        Calculate probabilities for all brackets.
+
+        Args:
+            brackets: List of market brackets
+            mean: Temperature distribution mean
+            std_dev: Temperature distribution standard deviation
+
+        Returns:
+            List of BracketProbability objects with model vs market comparison
+        """
+        results = []
+
+        for bracket in brackets:
+            model_prob = self.calculate_bracket_probability(bracket, mean, std_dev)
+            market_prob = bracket.implied_prob
+            edge = model_prob - market_prob
+
+            results.append(BracketProbability(
+                bracket=bracket,
+                model_prob=model_prob,
+                market_prob=market_prob,
+                edge=edge,
+                edge_pct=edge * 100,
+            ))
+
+        # Log summary
+        total_model_prob = sum(bp.model_prob for bp in results)
+        logger.info(
+            f"Calculated probabilities for {len(brackets)} brackets: "
+            f"total_model_prob={total_model_prob:.1%}"
+        )
+
+        return results
+
+    def calculate_from_adjusted_forecast(
+        self,
+        adjusted_forecast: AdjustedForecast,
+        brackets: List[MarketBracket],
+    ) -> List[BracketProbability]:
+        """
+        Calculate bracket probabilities using an adjusted forecast.
+
+        Args:
+            adjusted_forecast: The adjusted temperature forecast
+            brackets: List of market brackets
+
+        Returns:
+            List of BracketProbability objects
+        """
+        return self.calculate_all_probabilities(
+            brackets,
+            adjusted_forecast.mean_temp_f,
+            adjusted_forecast.std_dev,
+        )
+
+    def calculate_from_combined_forecast(
+        self,
+        combined_forecast: CombinedForecast,
+        brackets: List[MarketBracket],
+    ) -> List[BracketProbability]:
+        """
+        Calculate bracket probabilities using a combined forecast.
+
+        Args:
+            combined_forecast: The combined temperature forecast
+            brackets: List of market brackets
+
+        Returns:
+            List of BracketProbability objects
+        """
+        return self.calculate_all_probabilities(
+            brackets,
+            combined_forecast.mean_temp_f,
+            combined_forecast.std_dev,
+        )
+
+
+def calculate_bracket_probabilities(
+    brackets: List[MarketBracket],
+    mean: float,
+    std_dev: float,
+) -> List[BracketProbability]:
+    """
+    Convenience function to calculate bracket probabilities.
+
+    Args:
+        brackets: List of market brackets
+        mean: Temperature distribution mean
+        std_dev: Temperature distribution standard deviation
+
+    Returns:
+        List of BracketProbability objects
+    """
+    calculator = BracketProbabilityCalculator()
+    return calculator.calculate_all_probabilities(brackets, mean, std_dev)
