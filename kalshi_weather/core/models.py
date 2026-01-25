@@ -1,20 +1,28 @@
 """
-Shared interfaces for Kalshi Weather Bot.
+Core data models for Kalshi Weather Bot.
 
-ALL MODULES IMPORT FROM HERE.
-DO NOT MODIFY without coordinating across all modules.
+Contains all shared data classes, enums, and abstract interfaces.
 """
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, List, Dict
-from abc import ABC, abstractmethod
 from enum import Enum
+from typing import Dict, List, Optional
 
 
 # =============================================================================
 # ENUMS
 # =============================================================================
+
+
+class ContractType(Enum):
+    """Type of Kalshi weather contract."""
+    HIGH_TEMP = "high_temp"      # Daily high temperature
+    LOW_TEMP = "low_temp"        # Daily low temperature
+    SNOWFALL = "snowfall"        # Daily snowfall amount
+    RAINFALL = "rainfall"        # Daily rainfall amount
+
 
 class BracketType(Enum):
     """Type of Kalshi bracket."""
@@ -34,11 +42,12 @@ class StationType(Enum):
 # DATA CLASSES - WEATHER
 # =============================================================================
 
+
 @dataclass
 class TemperatureForecast:
     """
     A temperature forecast from a weather model.
-    
+
     All temperatures are in Fahrenheit.
     """
     source: str                    # e.g., "GFS", "ECMWF", "HRRR", "NWS"
@@ -56,7 +65,7 @@ class TemperatureForecast:
 class StationReading:
     """
     A single observation from an NWS station.
-    
+
     Includes both reported values and reverse-engineered actual bounds
     to handle the °C/°F conversion issues in 5-minute stations.
     """
@@ -73,7 +82,7 @@ class StationReading:
 class DailyObservation:
     """
     Aggregated observation data for a single day.
-    
+
     Includes uncertainty bounds accounting for station data quirks.
     """
     station_id: str                # e.g., "KNYC"
@@ -89,11 +98,12 @@ class DailyObservation:
 # DATA CLASSES - MARKET
 # =============================================================================
 
+
 @dataclass
 class MarketBracket:
     """
     A single bracket in a Kalshi temperature market.
-    
+
     Bracket boundary logic:
     - BETWEEN: lower ≤ temp ≤ upper (inclusive both ends)
     - GREATER_THAN: temp > threshold (strictly greater, threshold does NOT win)
@@ -110,7 +120,7 @@ class MarketBracket:
     last_price: int                # Last trade price in cents
     volume: int                    # Contracts traded
     implied_prob: float            # Mid-market probability (0.0 to 1.0)
-    
+
     def contains_temp(self, temp: float) -> bool:
         """Check if a temperature would settle in this bracket."""
         if self.bracket_type == BracketType.BETWEEN:
@@ -126,7 +136,7 @@ class MarketBracket:
 class TradingSignal:
     """
     A detected trading opportunity.
-    
+
     Generated when model probability diverges significantly from market price.
     """
     bracket: MarketBracket         # The bracket to trade
@@ -142,7 +152,7 @@ class TradingSignal:
 class MarketAnalysis:
     """
     Complete analysis for a single market/date.
-    
+
     Combines all data sources and generated signals.
     """
     city: str                      # e.g., "NYC"
@@ -160,14 +170,15 @@ class MarketAnalysis:
 # ABSTRACT INTERFACES
 # =============================================================================
 
+
 class WeatherModelSource(ABC):
     """Interface for fetching weather model forecasts."""
-    
+
     @abstractmethod
     def fetch_forecasts(self, target_date: str) -> List[TemperatureForecast]:
         """Fetch all available forecasts for a target date."""
         pass
-    
+
     @abstractmethod
     def get_latest_model_run_time(self) -> Optional[datetime]:
         """Get timestamp of most recent model run fetched."""
@@ -176,12 +187,12 @@ class WeatherModelSource(ABC):
 
 class StationDataSource(ABC):
     """Interface for fetching NWS station observations."""
-    
+
     @abstractmethod
     def fetch_current_observations(self) -> List[StationReading]:
         """Fetch recent observations from the station."""
         pass
-    
+
     @abstractmethod
     def get_daily_summary(self, date: str) -> Optional[DailyObservation]:
         """Get aggregated observation data for a specific date."""
@@ -190,12 +201,12 @@ class StationDataSource(ABC):
 
 class MarketDataSource(ABC):
     """Interface for fetching Kalshi market data."""
-    
+
     @abstractmethod
     def fetch_brackets(self, target_date: str) -> List[MarketBracket]:
         """Fetch all brackets for a target date's temperature market."""
         pass
-    
+
     @abstractmethod
     def get_market_status(self) -> Dict:
         """Get current market status (open/closed, etc.)."""
@@ -204,7 +215,7 @@ class MarketDataSource(ABC):
 
 class EdgeEngine(ABC):
     """Interface for calculating edges and generating signals."""
-    
+
     @abstractmethod
     def analyze(
         self,
