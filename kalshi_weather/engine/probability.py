@@ -1,8 +1,13 @@
 """
-Forecast Combiner
+Probability Engine - Modules 2A and 2B.
 
-Combines multiple weather forecasts into a single probability distribution
-using weighted averaging and proper uncertainty propagation.
+Module 2A: Forecast Combiner
+- Combines multiple weather forecasts into a single probability distribution
+- Uses weighted averaging with proper uncertainty propagation
+
+Module 2B: Observation Adjuster
+- Adjusts the combined forecast based on observed temperatures
+- Time-based weighting: early day uses forecast, late day uses observations
 """
 
 import logging
@@ -10,8 +15,9 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
-from kalshi_weather.core import TemperatureForecast
+from kalshi_weather.core import TemperatureForecast, DailyObservation
 
 logger = logging.getLogger(__name__)
 
@@ -264,3 +270,311 @@ def combine_forecasts(
     """
     combiner = ForecastCombiner(weights=weights)
     return combiner.combine(forecasts)
+
+
+# =============================================================================
+# MODULE 2B: OBSERVATION ADJUSTER
+# =============================================================================
+
+# Time-based weight thresholds (hours after noon in local time)
+EARLY_CUTOFF_HOURS = 2.0   # Before 2 PM: mostly forecast
+LATE_CUTOFF_HOURS = 4.0    # After 4 PM: mostly observation
+MAX_OBSERVATION_WEIGHT = 0.95  # Never fully trust observations (measurement error)
+
+# Observation uncertainty floor
+MIN_OBSERVATION_STD = 0.5  # Minimum std dev when using observations
+
+
+@dataclass
+class AdjustedForecast:
+    """
+    Result of adjusting a combined forecast with observations.
+
+    This represents our best estimate of the daily high temperature
+    distribution, incorporating both forecast data and real-time observations.
+    """
+    target_date: str                    # YYYY-MM-DD format
+    mean_temp_f: float                  # Adjusted mean temperature
+    std_dev: float                      # Adjusted uncertainty
+    low_f: float                        # 10th percentile estimate
+    high_f: float                       # 90th percentile estimate
+
+    # Original inputs
+    original_forecast: CombinedForecast  # The unadjusted forecast
+    observation: Optional[DailyObservation]  # Observation data used (if any)
+
+    # Adjustment details
+    observation_weight: float           # Weight given to observation (0-1)
+    forecast_weight: float              # Weight given to forecast (0-1)
+    hours_since_noon: float             # Hours past noon when adjusted
+    observed_high_f: Optional[float]    # Observed high used in adjustment
+
+    # Constraint info
+    min_possible_high: float            # High can't be below this
+    max_possible_high: float            # High unlikely to exceed this
+
+    adjusted_at: datetime = field(default_factory=datetime.now)
+
+    @property
+    def variance(self) -> float:
+        """Return variance (std_dev squared)."""
+        return self.std_dev ** 2
+
+    @property
+    def is_observation_dominant(self) -> bool:
+        """True if observations are weighted more than forecasts."""
+        return self.observation_weight > 0.5
+
+
+class ObservationAdjuster:
+    """
+    Adjusts forecast distributions based on observed temperatures.
+
+    Uses time-based weighting:
+    - Before 2 PM: Rely mostly on forecast (high hasn't occurred yet)
+    - 2 PM - 4 PM: Blend forecast and observations
+    - After 4 PM: Rely mostly on observations (high likely already occurred)
+
+    Also accounts for station measurement uncertainty and constrains
+    the distribution based on what's already been observed.
+    """
+
+    def __init__(
+        self,
+        timezone: ZoneInfo = None,
+        min_std_dev: float = MIN_STD_DEV,
+        max_observation_weight: float = MAX_OBSERVATION_WEIGHT,
+    ):
+        """
+        Initialize the observation adjuster.
+
+        Args:
+            timezone: Timezone for determining local time (default: America/New_York)
+            min_std_dev: Minimum standard deviation floor
+            max_observation_weight: Maximum weight for observations (< 1.0)
+        """
+        self.timezone = timezone or ZoneInfo("America/New_York")
+        self.min_std_dev = min_std_dev
+        self.max_observation_weight = max_observation_weight
+
+    def _calculate_hours_since_noon(self, current_time: Optional[datetime] = None) -> float:
+        """Calculate hours elapsed since noon in local timezone."""
+        if current_time is None:
+            current_time = datetime.now(self.timezone)
+        elif current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=self.timezone)
+        else:
+            current_time = current_time.astimezone(self.timezone)
+
+        # Hours since midnight
+        hours = current_time.hour + current_time.minute / 60.0
+
+        # Hours since noon (can be negative before noon)
+        return hours - 12.0
+
+    def _calculate_observation_weight(self, hours_since_noon: float) -> float:
+        """
+        Calculate weight to give observations based on time of day.
+
+        Returns a value between 0 and max_observation_weight.
+
+        Weight curve:
+        - Before noon: 0 (forecast only)
+        - Noon to 2 PM: 0 to 0.3 (linear ramp)
+        - 2 PM to 4 PM: 0.3 to 0.8 (steeper ramp - peak heating hours)
+        - After 4 PM: 0.8 to max (gradual increase)
+        """
+        if hours_since_noon <= 0:
+            # Before noon - pure forecast
+            return 0.0
+
+        if hours_since_noon < EARLY_CUTOFF_HOURS:
+            # Noon to 2 PM: gradual ramp from 0 to 0.3
+            return 0.15 * hours_since_noon
+
+        if hours_since_noon < LATE_CUTOFF_HOURS:
+            # 2 PM to 4 PM: steeper ramp from 0.3 to 0.8
+            progress = (hours_since_noon - EARLY_CUTOFF_HOURS) / (LATE_CUTOFF_HOURS - EARLY_CUTOFF_HOURS)
+            return 0.3 + 0.5 * progress
+
+        # After 4 PM: gradual approach to max
+        # Takes ~4 more hours to reach max_observation_weight
+        extra_hours = hours_since_noon - LATE_CUTOFF_HOURS
+        progress = min(extra_hours / 4.0, 1.0)
+        weight = 0.8 + (self.max_observation_weight - 0.8) * progress
+
+        return min(weight, self.max_observation_weight)
+
+    def _calculate_adjusted_mean(
+        self,
+        forecast_mean: float,
+        observed_high: float,
+        observation_weight: float,
+    ) -> float:
+        """
+        Calculate adjusted mean by blending forecast and observation.
+
+        The adjusted mean is constrained to be at least the observed high
+        (since the actual high can't be lower than what we've already seen).
+        """
+        forecast_weight = 1.0 - observation_weight
+        blended_mean = forecast_weight * forecast_mean + observation_weight * observed_high
+
+        # The high temperature can't be lower than what we've observed
+        return max(blended_mean, observed_high)
+
+    def _calculate_adjusted_std_dev(
+        self,
+        forecast_std: float,
+        observation: DailyObservation,
+        observation_weight: float,
+        adjusted_mean: float,
+    ) -> float:
+        """
+        Calculate adjusted standard deviation.
+
+        Late in the day, uncertainty shrinks because:
+        1. We've observed most of the day's temperatures
+        2. The remaining time has limited potential for change
+
+        We also incorporate station measurement uncertainty.
+        """
+        # Station uncertainty range
+        station_uncertainty = (
+            observation.possible_actual_high_high - observation.possible_actual_high_low
+        ) / 2.0
+
+        # As observation weight increases, std dev shrinks toward station uncertainty
+        forecast_weight = 1.0 - observation_weight
+
+        # Blend uncertainties
+        # Higher observation weight = more confidence = lower std dev
+        if observation_weight > 0.5:
+            # Late day: uncertainty mainly from station measurement
+            blended_std = (
+                forecast_weight * forecast_std +
+                observation_weight * station_uncertainty
+            )
+        else:
+            # Early/mid day: forecast uncertainty dominates but shrinks somewhat
+            # if observed high is close to forecast mean
+            temp_diff = abs(adjusted_mean - observation.observed_high_f)
+            agreement_factor = max(0.8, 1.0 - temp_diff / 20.0)
+            blended_std = forecast_std * agreement_factor
+
+        return max(self.min_std_dev, blended_std)
+
+    def adjust(
+        self,
+        combined_forecast: CombinedForecast,
+        observation: Optional[DailyObservation] = None,
+        current_time: Optional[datetime] = None,
+    ) -> AdjustedForecast:
+        """
+        Adjust a combined forecast using observation data.
+
+        Args:
+            combined_forecast: The combined forecast to adjust
+            observation: Daily observation data (optional)
+            current_time: Current time for weight calculation (default: now)
+
+        Returns:
+            AdjustedForecast with blended mean and adjusted uncertainty
+        """
+        hours_since_noon = self._calculate_hours_since_noon(current_time)
+
+        # If no observation data, return forecast unchanged (wrapped in AdjustedForecast)
+        if observation is None or not observation.readings:
+            z_10 = 1.28155
+            return AdjustedForecast(
+                target_date=combined_forecast.target_date,
+                mean_temp_f=combined_forecast.mean_temp_f,
+                std_dev=combined_forecast.std_dev,
+                low_f=combined_forecast.low_f,
+                high_f=combined_forecast.high_f,
+                original_forecast=combined_forecast,
+                observation=None,
+                observation_weight=0.0,
+                forecast_weight=1.0,
+                hours_since_noon=hours_since_noon,
+                observed_high_f=None,
+                min_possible_high=combined_forecast.low_f,
+                max_possible_high=combined_forecast.high_f,
+            )
+
+        # Calculate time-based weight
+        observation_weight = self._calculate_observation_weight(hours_since_noon)
+        forecast_weight = 1.0 - observation_weight
+
+        # Calculate adjusted mean
+        adjusted_mean = self._calculate_adjusted_mean(
+            combined_forecast.mean_temp_f,
+            observation.observed_high_f,
+            observation_weight,
+        )
+
+        # Calculate adjusted std dev
+        adjusted_std = self._calculate_adjusted_std_dev(
+            combined_forecast.std_dev,
+            observation,
+            observation_weight,
+            adjusted_mean,
+        )
+
+        # Calculate percentiles
+        z_10 = 1.28155
+        low_f = adjusted_mean - z_10 * adjusted_std
+        high_f = adjusted_mean + z_10 * adjusted_std
+
+        # Constrain low_f - can't be below observation bounds
+        min_possible = observation.possible_actual_high_low
+        low_f = max(low_f, min_possible)
+
+        # Constrain max - use observation upper bound late in day
+        if observation_weight > 0.7:
+            max_possible = observation.possible_actual_high_high + adjusted_std
+        else:
+            max_possible = max(high_f, observation.possible_actual_high_high)
+
+        logger.info(
+            f"Adjusted forecast: mean={adjusted_mean:.1f}°F (was {combined_forecast.mean_temp_f:.1f}°F), "
+            f"std={adjusted_std:.2f}°F, obs_weight={observation_weight:.2f}"
+        )
+
+        return AdjustedForecast(
+            target_date=combined_forecast.target_date,
+            mean_temp_f=adjusted_mean,
+            std_dev=adjusted_std,
+            low_f=low_f,
+            high_f=high_f,
+            original_forecast=combined_forecast,
+            observation=observation,
+            observation_weight=observation_weight,
+            forecast_weight=forecast_weight,
+            hours_since_noon=hours_since_noon,
+            observed_high_f=observation.observed_high_f,
+            min_possible_high=min_possible,
+            max_possible_high=max_possible,
+        )
+
+
+def adjust_forecast_with_observations(
+    combined_forecast: CombinedForecast,
+    observation: Optional[DailyObservation] = None,
+    timezone: ZoneInfo = None,
+    current_time: Optional[datetime] = None,
+) -> AdjustedForecast:
+    """
+    Convenience function to adjust a forecast with observations.
+
+    Args:
+        combined_forecast: The combined forecast to adjust
+        observation: Daily observation data (optional)
+        timezone: Local timezone (default: America/New_York)
+        current_time: Current time override for testing
+
+    Returns:
+        AdjustedForecast with blended distribution
+    """
+    adjuster = ObservationAdjuster(timezone=timezone)
+    return adjuster.adjust(combined_forecast, observation, current_time)
