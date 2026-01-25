@@ -1,19 +1,30 @@
 """
-Tests for the probability engine - Module 2A: Forecast Combiner.
+Tests for the probability engine.
+
+Module 2A: Forecast Combiner
+Module 2B: Observation Adjuster
 """
 
 import pytest
 import math
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from kalshi_weather.core import TemperatureForecast
+from kalshi_weather.core import TemperatureForecast, DailyObservation, StationReading, StationType
 from kalshi_weather.engine.probability import (
+    # Module 2A
     ForecastCombiner,
     CombinedForecast,
     combine_forecasts,
     DEFAULT_WEIGHTS,
     MIN_STD_DEV,
     MAX_STD_DEV,
+    # Module 2B
+    ObservationAdjuster,
+    AdjustedForecast,
+    adjust_forecast_with_observations,
+    EARLY_CUTOFF_HOURS,
+    LATE_CUTOFF_HOURS,
 )
 
 
@@ -475,3 +486,394 @@ class TestMathematicalCorrectness:
         # Std dev = sqrt(18) ≈ 4.24
         expected_std = math.sqrt(18)
         assert abs(result.std_dev - expected_std) < 0.01
+
+
+# =============================================================================
+# MODULE 2B: OBSERVATION ADJUSTER TESTS
+# =============================================================================
+
+NYC_TZ = ZoneInfo("America/New_York")
+
+
+def make_combined_forecast(
+    mean: float = 55.0,
+    std_dev: float = 2.0,
+    target_date: str = TARGET_DATE,
+) -> CombinedForecast:
+    """Create a test combined forecast."""
+    z_10 = 1.28155
+    return CombinedForecast(
+        target_date=target_date,
+        mean_temp_f=mean,
+        std_dev=std_dev,
+        low_f=mean - z_10 * std_dev,
+        high_f=mean + z_10 * std_dev,
+        source_count=1,
+        sources_used=["NWS"],
+        weights_used={"NWS": 1.0},
+    )
+
+
+def make_observation(
+    observed_high: float = 54.0,
+    low_bound: float = 53.0,
+    high_bound: float = 55.0,
+    date: str = TARGET_DATE,
+) -> DailyObservation:
+    """Create a test daily observation."""
+    reading = StationReading(
+        station_id="KNYC",
+        timestamp=datetime.now(NYC_TZ),
+        station_type=StationType.FIVE_MINUTE,
+        reported_temp_f=observed_high,
+        reported_temp_c=None,
+        possible_actual_f_low=low_bound,
+        possible_actual_f_high=high_bound,
+    )
+    return DailyObservation(
+        station_id="KNYC",
+        date=date,
+        observed_high_f=observed_high,
+        possible_actual_high_low=low_bound,
+        possible_actual_high_high=high_bound,
+        readings=[reading],
+        last_updated=datetime.now(NYC_TZ),
+    )
+
+
+def make_time(hour: int, minute: int = 0) -> datetime:
+    """Create a datetime at specific hour in NYC timezone."""
+    return datetime(2026, 1, 20, hour, minute, tzinfo=NYC_TZ)
+
+
+# =============================================================================
+# TIME-BASED WEIGHT TESTS
+# =============================================================================
+
+
+class TestObservationWeight:
+    """Tests for time-based observation weight calculation."""
+
+    def test_before_noon_zero_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        # 10 AM - should be pure forecast
+        hours = adjuster._calculate_hours_since_noon(make_time(10, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert weight == 0.0
+
+    def test_at_noon_zero_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(12, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert weight == 0.0
+
+    def test_at_1pm_low_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(13, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert 0.1 < weight < 0.2  # Should be around 0.15
+
+    def test_at_2pm_transitional_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(14, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert abs(weight - 0.3) < 0.05
+
+    def test_at_3pm_mid_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(15, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert 0.5 < weight < 0.6
+
+    def test_at_4pm_high_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(16, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert abs(weight - 0.8) < 0.05
+
+    def test_at_6pm_very_high_weight(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(18, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert weight > 0.85
+
+    def test_late_evening_approaches_max(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        hours = adjuster._calculate_hours_since_noon(make_time(20, 0))
+        weight = adjuster._calculate_observation_weight(hours)
+        assert weight >= 0.9
+        assert weight <= 0.95  # Never reaches 1.0
+
+    def test_weight_monotonically_increases(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        weights = []
+        for hour in range(12, 21):
+            hours = adjuster._calculate_hours_since_noon(make_time(hour, 0))
+            weights.append(adjuster._calculate_observation_weight(hours))
+        # Each weight should be >= previous
+        for i in range(1, len(weights)):
+            assert weights[i] >= weights[i - 1]
+
+
+# =============================================================================
+# ADJUSTED MEAN TESTS
+# =============================================================================
+
+
+class TestAdjustedMean:
+    """Tests for adjusted mean calculation."""
+
+    def test_no_observation_unchanged(self):
+        forecast = make_combined_forecast(mean=55.0)
+        result = adjust_forecast_with_observations(forecast, None)
+        assert result.mean_temp_f == 55.0
+        assert result.observation_weight == 0.0
+
+    def test_early_morning_mostly_forecast(self):
+        forecast = make_combined_forecast(mean=55.0)
+        observation = make_observation(observed_high=50.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(10, 0)
+        )
+        # Before noon, should be pure forecast
+        assert result.mean_temp_f == 55.0
+
+    def test_late_day_mostly_observation(self):
+        forecast = make_combined_forecast(mean=55.0)
+        observation = make_observation(observed_high=58.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(18, 0)
+        )
+        # Late day, should be much closer to observation
+        assert result.mean_temp_f > 56.5
+
+    def test_mean_never_below_observed_high(self):
+        forecast = make_combined_forecast(mean=50.0)
+        observation = make_observation(observed_high=55.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # Mean can't be below what we've observed
+        assert result.mean_temp_f >= 55.0
+
+    def test_blending_at_midday(self):
+        forecast = make_combined_forecast(mean=60.0)
+        observation = make_observation(observed_high=50.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # Should be between forecast and observation, but >= observed
+        assert result.mean_temp_f >= 50.0
+        assert result.mean_temp_f < 60.0
+
+
+# =============================================================================
+# ADJUSTED UNCERTAINTY TESTS
+# =============================================================================
+
+
+class TestAdjustedUncertainty:
+    """Tests for adjusted standard deviation calculation."""
+
+    def test_no_observation_preserves_std(self):
+        forecast = make_combined_forecast(mean=55.0, std_dev=3.0)
+        result = adjust_forecast_with_observations(forecast, None)
+        assert result.std_dev == 3.0
+
+    def test_late_day_reduced_uncertainty(self):
+        forecast = make_combined_forecast(mean=55.0, std_dev=3.0)
+        observation = make_observation(
+            observed_high=54.0, low_bound=53.5, high_bound=54.5
+        )
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(18, 0)
+        )
+        # Late day with tight observation bounds should reduce uncertainty
+        assert result.std_dev < 3.0
+
+    def test_std_dev_minimum_floor(self):
+        forecast = make_combined_forecast(mean=55.0, std_dev=0.5)
+        observation = make_observation(
+            observed_high=55.0, low_bound=54.9, high_bound=55.1
+        )
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(20, 0)
+        )
+        # Should still have minimum uncertainty
+        assert result.std_dev >= MIN_STD_DEV
+
+
+# =============================================================================
+# CONSTRAINT TESTS
+# =============================================================================
+
+
+class TestConstraints:
+    """Tests for min/max possible high constraints."""
+
+    def test_min_possible_from_observation(self):
+        forecast = make_combined_forecast(mean=55.0)
+        observation = make_observation(low_bound=52.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        assert result.min_possible_high == 52.0
+
+    def test_low_f_constrained_by_observation(self):
+        forecast = make_combined_forecast(mean=55.0, std_dev=5.0)
+        observation = make_observation(low_bound=53.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # low_f should not go below observation bounds
+        assert result.low_f >= 53.0
+
+
+# =============================================================================
+# ADJUSTED FORECAST PROPERTIES
+# =============================================================================
+
+
+class TestAdjustedForecastProperties:
+    """Tests for AdjustedForecast data class properties."""
+
+    def test_variance_property(self):
+        forecast = make_combined_forecast(mean=55.0, std_dev=2.0)
+        result = adjust_forecast_with_observations(forecast, None)
+        assert abs(result.variance - 4.0) < 0.01
+
+    def test_is_observation_dominant_false_early(self):
+        forecast = make_combined_forecast()
+        observation = make_observation()
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(13, 0)
+        )
+        assert not result.is_observation_dominant
+
+    def test_is_observation_dominant_true_late(self):
+        forecast = make_combined_forecast()
+        observation = make_observation()
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(17, 0)
+        )
+        assert result.is_observation_dominant
+
+    def test_stores_original_forecast(self):
+        forecast = make_combined_forecast(mean=55.0)
+        observation = make_observation()
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        assert result.original_forecast.mean_temp_f == 55.0
+
+    def test_stores_observation(self):
+        forecast = make_combined_forecast()
+        observation = make_observation(observed_high=54.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        assert result.observation is not None
+        assert result.observed_high_f == 54.0
+
+    def test_hours_since_noon_recorded(self):
+        forecast = make_combined_forecast()
+        observation = make_observation()
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(14, 30)
+        )
+        assert abs(result.hours_since_noon - 2.5) < 0.01
+
+
+# =============================================================================
+# EDGE CASES
+# =============================================================================
+
+
+class TestObservationAdjusterEdgeCases:
+    """Tests for edge cases in observation adjustment."""
+
+    def test_empty_readings_treated_as_no_observation(self):
+        forecast = make_combined_forecast(mean=55.0)
+        observation = DailyObservation(
+            station_id="KNYC",
+            date=TARGET_DATE,
+            observed_high_f=50.0,
+            possible_actual_high_low=49.0,
+            possible_actual_high_high=51.0,
+            readings=[],  # Empty readings
+        )
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # Should behave as if no observation
+        assert result.observation_weight == 0.0
+        assert result.mean_temp_f == 55.0
+
+    def test_different_timezone(self):
+        la_tz = ZoneInfo("America/Los_Angeles")
+        adjuster = ObservationAdjuster(timezone=la_tz)
+        # 3 PM LA time
+        la_time = datetime(2026, 1, 20, 15, 0, tzinfo=la_tz)
+        hours = adjuster._calculate_hours_since_noon(la_time)
+        assert abs(hours - 3.0) < 0.01
+
+    def test_naive_datetime_assumes_local(self):
+        adjuster = ObservationAdjuster(timezone=NYC_TZ)
+        naive_time = datetime(2026, 1, 20, 14, 0)  # No timezone
+        hours = adjuster._calculate_hours_since_noon(naive_time)
+        assert abs(hours - 2.0) < 0.01
+
+
+# =============================================================================
+# REAL WORLD SCENARIOS
+# =============================================================================
+
+
+class TestObservationAdjusterScenarios:
+    """Tests simulating real-world observation adjustment scenarios."""
+
+    def test_morning_cold_observation(self):
+        """Morning: observed high is low, forecast expects warmer - trust forecast."""
+        forecast = make_combined_forecast(mean=55.0, std_dev=2.0)
+        observation = make_observation(observed_high=45.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(9, 0)
+        )
+        # Morning: pure forecast
+        assert result.mean_temp_f == 55.0
+        assert result.observation_weight == 0.0
+
+    def test_afternoon_warm_observation(self):
+        """Afternoon: observed high exceeds forecast - adjust upward."""
+        forecast = make_combined_forecast(mean=55.0, std_dev=2.0)
+        observation = make_observation(observed_high=60.0, high_bound=61.0)
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # Should be pulled toward observation
+        assert result.mean_temp_f >= 60.0  # Can't be below observed
+
+    def test_evening_observation_dominates(self):
+        """Evening: observed high should dominate."""
+        forecast = make_combined_forecast(mean=50.0, std_dev=2.0)
+        observation = make_observation(
+            observed_high=55.0, low_bound=54.5, high_bound=55.5
+        )
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(19, 0)
+        )
+        # Evening: close to observation
+        assert result.mean_temp_f >= 54.5
+        assert result.observation_weight > 0.85
+
+    def test_forecast_observation_agree(self):
+        """When forecast and observation agree, uncertainty should be lower."""
+        forecast = make_combined_forecast(mean=55.0, std_dev=3.0)
+        observation = make_observation(
+            observed_high=55.0, low_bound=54.5, high_bound=55.5
+        )
+        result = adjust_forecast_with_observations(
+            forecast, observation, current_time=make_time(15, 0)
+        )
+        # Agreement should reduce uncertainty somewhat
+        assert result.std_dev <= 3.0
