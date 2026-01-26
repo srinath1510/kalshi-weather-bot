@@ -136,5 +136,13 @@ def cities():
         click.echo(f"  {code:<5} - {city.name}")
 
 
+@main.command()
+@click.option("--city", "-c", default="NYC", help="City code (NYC, CHI, LAX, MIA, AUS)")
+def run(city: str):
+    """Run the interactive dashboard bot."""
+    from kalshi_weather.cli.bot import run_bot
+    run_bot(city)
+
+
 if __name__ == "__main__":
     main()

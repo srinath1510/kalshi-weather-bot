@@ -37,14 +37,14 @@
         - [x] Implement filtering and ranking
         - [x] Generate reasoning strings
 
-- [ ] **Phase 4: CLI Display** <!-- id: 5 -->
-    - [ ] Module 4A: Terminal Dashboard
-        - [ ] Create TUI layout
-        - [ ] Implement real-time refresh loop
-    - [ ] Module 4B: Signal Alerts
-        - [ ] Design alert format
-        - [ ] Integrate into dashboard
+- [x] **Phase 4: CLI Display** <!-- id: 5 -->
+    - [x] Module 4A: Terminal Dashboard
+        - [x] Create TUI layout
+        - [x] Implement real-time refresh loop
+    - [x] Module 4B: Signal Alerts
+        - [x] Design alert format
+        - [x] Integrate into dashboard
 
-- [ ] **Integration & Verification** <!-- id: 6 -->
-    - [ ] Wire everything together in `main.py`
-    - [ ] End-to-end testing
+- [x] **Integration & Verification** <!-- id: 6 -->
+    - [x] Wire everything together in `main.py`
+    - [x] End-to-end testing
