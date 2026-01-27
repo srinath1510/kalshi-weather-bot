@@ -25,6 +25,13 @@ from kalshi_weather.data.markets import (
     format_date_for_ticker,
 )
 
+from kalshi_weather.data.historical import (
+    SettlementRecord,
+    fetch_settlement,
+    fetch_settlement_range,
+    get_yesterday_settlement,
+)
+
 __all__ = [
     # Weather
     "OpenMeteoSource",
@@ -45,4 +52,9 @@ __all__ = [
     "parse_bracket_subtitle",
     "calculate_implied_probability",
     "format_date_for_ticker",
+    # Historical
+    "SettlementRecord",
+    "fetch_settlement",
+    "fetch_settlement_range",
+    "get_yesterday_settlement",
 ]
