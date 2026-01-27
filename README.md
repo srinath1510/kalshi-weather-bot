@@ -23,6 +23,32 @@ It aggregates weather forecasts (NWS, Open-Meteo), tracks live station data from
     python -m kalshi_weather run
     ```
 
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `run` | Launch the interactive trading dashboard |
+| `status` | Check market status and available dates |
+| `brackets` | Display current market brackets and prices |
+| `forecasts` | Show weather forecasts from all sources |
+| `settlement` | View historical settlement temperatures |
+| `cities` | List supported cities |
+
+### Settlement Command
+
+View official settlement temperatures from NWS Daily Climate Reports (the same source Kalshi uses):
+
+```bash
+# Yesterday's settlement
+python -m kalshi_weather settlement
+
+# Specific date
+python -m kalshi_weather settlement --date 2026-01-25
+
+# Last 7 days
+python -m kalshi_weather settlement --days 7
+```
+
 ## Documentation
 
 *   [Usage & Signals Guide](docs/usage_guide.md) - How to read the dashboard and trade.
