@@ -144,5 +144,60 @@ def run(city: str):
     run_bot(city)
 
 
+@main.command()
+@click.option("--city", "-c", default="NYC", help="City code (NYC, CHI, LAX, MIA, AUS)")
+@click.option("--date", "-d", default=None, help="Target date (YYYY-MM-DD), defaults to yesterday")
+@click.option("--days", "-n", default=None, type=int, help="Show last N days of settlements")
+def settlement(city: str, date: str, days: int):
+    """Show historical settlement temperatures."""
+    from kalshi_weather.data.historical import fetch_settlement, fetch_settlement_range
+
+    try:
+        city_config = get_city(city)
+    except KeyError as e:
+        click.echo(f"Error: {e}", err=True)
+        return
+
+    click.echo(f"\n{'='*55}")
+    click.echo(f"Settlement Data: {city_config.name}")
+    click.echo(f"{'='*55}")
+
+    if days:
+        # Show last N days
+        end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+        records = fetch_settlement_range(start_date, end_date, city_config)
+
+        if not records:
+            click.echo("No settlement data available for this period", err=True)
+            return
+
+        click.echo(f"\n{'Date':<12} {'High':>8} {'Low':>8}")
+        click.echo("-" * 30)
+
+        for r in sorted(records, key=lambda x: x.date, reverse=True):
+            click.echo(f"{r.date:<12} {r.settlement_high_f:>7.1f}° {r.settlement_low_f:>7.1f}°")
+
+        click.echo("-" * 30)
+        click.echo(f"Source: {records[0].source}")
+    else:
+        # Show single date (default: yesterday)
+        if not date:
+            date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        record = fetch_settlement(date, city_config)
+
+        if not record:
+            click.echo(f"No settlement data available for {date}", err=True)
+            return
+
+        click.echo(f"\nDate:            {record.date}")
+        click.echo(f"High Temp:       {record.settlement_high_f:.0f}°F")
+        click.echo(f"Low Temp:        {record.settlement_low_f:.0f}°F")
+        click.echo(f"Source:          {record.source}")
+        click.echo(f"Station:         {record.station_name}")
+
+
 if __name__ == "__main__":
     main()
