@@ -112,7 +112,7 @@ class Dashboard:
         # Show last reading time and value if available
         if obs.readings:
             last = obs.readings[-1]
-            grid.add_row("Last Reading:", f"{last.timestamp.strftime('%H:%M')} ({last.reported_temp_f}°F)")
+            grid.add_row("Last Reading:", f"{last.timestamp.astimezone().strftime('%H:%M')} ({last.reported_temp_f}°F)")
         
         return Panel(grid, title="Live Observations (KNYC)", border_style="green")
 
