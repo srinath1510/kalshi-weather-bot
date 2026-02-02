@@ -2,7 +2,10 @@
 
 A Python bot that finds trading edges in Kalshi's NYC Daily High Temperature markets.
 
+
 It aggregates weather forecasts (NWS, Open-Meteo), tracks live station data from Central Park (KNYC), and uses a probability engine to tell you when the market is wrong.
+
+![Kalshi Weather Bot in Action](docs/assets/in-action.png)
 
 ## How It Works
 
