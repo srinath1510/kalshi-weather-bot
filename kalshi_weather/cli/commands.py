@@ -199,5 +199,73 @@ def settlement(city: str, date: str, days: int):
         click.echo(f"Station:         {record.station_name}")
 
 
+@main.command()
+@click.option("--city", "-c", default="NYC", help="City code (NYC, CHI, LAX, MIA, AUS)")
+@click.option("--date", "-d", help="Target date (YYYY-MM-DD)")
+@click.option("--all", "-a", "fetch_all", is_flag=True, help="Fetch all DSM versions for the date")
+def dsm(city: str, date: str, fetch_all: bool):
+    """Fetch ASOS Daily Summary Messages (DSM)."""
+    from kalshi_weather.data.dsm import DSMParser
+    
+    try:
+        city_config = get_city(city)
+    except KeyError as e:
+        click.echo(f"Error: {e}", err=True)
+        return
+
+    parser = DSMParser(city_config)
+    
+    # If date is not provided, default to finding the latest available DSM.
+    # Note: If date NOT provided and fetch_all is False, just fetch latest (v1).
+    # If date NOT provided and fetch_all is True, maybe fetch for "today" (or latest date)?
+    # Let's align with user request: "get all DSMs for a given date... default should be the latest DSM report"
+    
+    if not date:
+        # Just fetch the latest report (Version 1)
+        click.echo(f"Fetching latest DSM for {city}...")
+        obs = parser.fetch_dsm(version=1)
+        if obs:
+            click.echo(f"\nDSM Date: {obs.date}")
+            click.echo(f"High:     {obs.observed_high_f}")
+            # click.echo(f"Text:     {obs.raw_text}") # We don't have raw text in DailyObservation yet.
+        else:
+            click.echo("No DSM found.")
+        return
+
+    # If date IS provided
+    click.echo(f"Fetching DSMs for {city} on {date}...")
+    
+    if fetch_all:
+        dsms = parser.fetch_dsms_for_date(date)
+        if not dsms:
+            click.echo(f"No DSMs found for {date}")
+            return
+            
+        click.echo(f"\nFound {len(dsms)} versions for {date}:")
+        for i, obs in enumerate(dsms):
+            click.echo(f"\n--- Version {i+1} (approx) ---") # We don't track version number in object, strictly speaking.
+            # Ideally we would store version in DailyObservation or return a tuple.
+            # But since fetch_dsms_for_date iterates 1..N, the list is [v1_of_that_date, v2_of_that_date...]
+            # Actually, `fetch_dsms_for_date` iterates v1..vN.
+            # It appends if match.
+            # So the first item in list is the newest version *matching that date*.
+            click.echo(f"High: {obs.observed_high_f}")
+            click.echo(f"Last Updated: {obs.last_updated}")
+    else:
+        # Just fetch one for that date?
+        # The user said "get all DSMs for a given date (there can be more than one)".
+        # Whatever the default behavior for "date provided" is, maybe just the best one?
+        # But `fetch_dsm(version=1)` might return a different date.
+        # So we HAVE to search if we want a specific date.
+        # So if date is provided, we use `fetch_dsms_for_date` and return the first one (latest for that date).
+        dsms = parser.fetch_dsms_for_date(date)
+        if dsms:
+            obs = dsms[0] # Latest version for that date
+            click.echo(f"\nDSM Date: {obs.date}")
+            click.echo(f"High:     {obs.observed_high_f}")
+        else:
+            click.echo(f"No DSM found for {date}")
+
+
 if __name__ == "__main__":
     main()
