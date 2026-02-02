@@ -32,6 +32,7 @@ It aggregates weather forecasts (NWS, Open-Meteo), tracks live station data from
 | `brackets` | Display current market brackets and prices |
 | `forecasts` | Show weather forecasts from all sources |
 | `settlement` | View historical settlement temperatures |
+| `dsm` | Fetch official Daily Summary Message (DSM) reports |
 | `cities` | List supported cities |
 
 ### Settlement Command
@@ -47,6 +48,21 @@ python -m kalshi_weather settlement --date 2026-01-25
 
 # Last 7 days
 python -m kalshi_weather settlement --days 7
+```
+
+### DSM Command
+
+Fetch the raw Daily Summary Message (DSM) from the NWS. This is the official source for daily High/Low temperatures used for settlement.
+
+```bash
+# Get the latest DSM report
+kalshi-weather dsm
+
+# Get the latest report for a specific date
+kalshi-weather dsm --date 2026-02-02
+
+# Get ALL versions/updates for a date
+kalshi-weather dsm --date 2026-02-02 --all
 ```
 
 ## Documentation
