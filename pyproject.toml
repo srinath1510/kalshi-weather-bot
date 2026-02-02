@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-kalshi-weather = "kalshi_weather.cli:main"
+kalshi-weather = "kalshi_weather.cli.commands:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/kalshi-weather-bot"

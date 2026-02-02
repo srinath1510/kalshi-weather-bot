@@ -16,6 +16,11 @@ from kalshi_weather.data.stations import (
     determine_station_type,
 )
 
+from kalshi_weather.data.dsm import (
+    DSMParser,
+    get_dsm_observation,
+)
+
 from kalshi_weather.data.markets import (
     KalshiMarketClient,
     fetch_brackets_for_date,
@@ -45,6 +50,9 @@ __all__ = [
     "celsius_to_fahrenheit",
     "calculate_temp_bounds",
     "determine_station_type",
+    # DSM
+    "DSMParser",
+    "get_dsm_observation",
     # Markets
     "KalshiMarketClient",
     "fetch_brackets_for_date",
