@@ -206,6 +206,7 @@ class NWSStationParser(StationDataSource):
             r for r in readings
             if r.timestamp.astimezone(self.timezone).date() == target_date
         ]
+        daily_readings.sort(key=lambda r: r.timestamp)
 
         if not daily_readings:
             return None
